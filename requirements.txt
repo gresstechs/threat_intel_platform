@@ -1,0 +1,13 @@
+requests==2.31.0
+python-dotenv==1.0.0
+psycopg2-binary==2.9.9
+OTXv2==1.5.12
+ratelimit==2.2.1
+tenacity==8.2.3
+pandas==2.1.4
+scikit-learn==1.4.0
+xgboost==2.0.3
+pytest==7.4.4
+pytest-cov==4.1.0
+loguru==0.7.2
+pydantic==2.5.3
