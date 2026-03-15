@@ -1,0 +1,17 @@
+{
+  "rf_accuracy": 0.9968032589784573,
+  "rf_f1": 0.9975106147453977,
+  "xgb_accuracy": 0.9990452211550702,
+  "xgb_f1": 0.9990819176140426,
+  "classes": [
+    "BENIGN",
+    "BRUTE_FORCE",
+    "DDOS",
+    "MALWARE",
+    "PHISHING",
+    "SCANNING"
+  ],
+  "n_features": 78,
+  "train_samples": 650000,
+  "test_samples": 565576
+}
