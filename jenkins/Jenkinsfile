@@ -28,7 +28,7 @@ pipeline {
 
     // ── Environment Variables ────────────────────────────────────────────────
     environment {
-        PYTHON           = 'python3'
+        PYTHON           = '/usr/bin/python3'
         SRC_DIR          = 'src'
         TEST_DIR         = 'tests'
         MODEL_DIR        = 'models'
@@ -121,10 +121,8 @@ ENVEOF
                 script {
                     // Install dependencies
                     sh """
-                        ${PYTHON} -m pip install -r requirements.txt --quiet \
-                            --break-system-packages 2>/dev/null || \
-                        pip3 install -r requirements.txt --quiet \
-                            --break-system-packages
+                        /usr/bin/python3 -m pip install -r requirements.txt \
+                            --break-system-packages --quiet
                         echo "✅ Dependencies installed"
                     """
 
