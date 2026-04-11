@@ -1,0 +1,405 @@
+/*
+ * Jenkinsfile — Automated Threat Intelligence Correlation Platform
+ * Deliverable D3.2 | MSc Applied Computing Dissertation 2024/25
+ * Student: Chidera Progress Nwaokwa (240054490)
+ *
+ * Pipeline Stages:
+ *   1. Environment Validation   — verify credentials, DB connectivity
+ *   2. Unit Tests               — run full pytest suite with coverage
+ *   3. API Ingestion            — fetch latest indicators from all 3 feeds
+ *   4. Alert Prioritisation     — score and queue new indicators
+ *   5. Model Performance Check  — evaluate current model on latest data
+ *   6. Model Retraining         — retrain if accuracy drops below threshold
+ *   7. Dashboard Refresh        — signal Grafana to reload data
+ *   8. Notification             — report pipeline results
+ *
+ * Triggers:
+ *   - Scheduled: Every 6 hours (API ingestion + prioritisation)
+ *   - Weekly:    Full retraining evaluation (Sundays 02:00)
+ *   - On commit: Unit tests + environment validation only
+ *
+ * Addresses temporal degradation problem (Pendlebury et al., 2022):
+ *   Model is retrained automatically when accuracy drops below 95%
+ *   or when 7+ days have elapsed since last retraining.
+ */
+
+pipeline {
+
+    agent any
+
+    // ── Environment Variables ────────────────────────────────────────────────
+    environment {
+        PYTHON          = 'python3'
+        SRC_DIR         = 'src'
+        TEST_DIR        = 'tests'
+        MODEL_DIR       = 'models'
+        REPORTS_DIR     = 'reports'
+        COVERAGE_MIN    = '80'          // Minimum test coverage %
+        ACCURACY_MIN    = '0.95'        // Minimum ML model accuracy
+        RETRAIN_MAX_DAYS = '7'          // Force retrain after this many days
+        PLATFORM_EMAIL  = 'bi78xz@student.sunderland.ac.uk'
+
+        // Credentials loaded from Jenkins Credential Store
+        // (never hardcoded — stored as Jenkins Secret Text credentials)
+        DB_CREDENTIALS  = credentials('neon-db-url')
+        OTX_KEY         = credentials('otx-api-key')
+        VT_KEY          = credentials('virustotal-api-key')
+        ABUSE_KEY       = credentials('abuseipdb-api-key')
+    }
+
+    // ── Pipeline Options ─────────────────────────────────────────────────────
+    options {
+        timeout(time: 2, unit: 'HOURS')
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        disableConcurrentBuilds()
+        timestamps()
+    }
+
+    // ── Triggers ─────────────────────────────────────────────────────────────
+    triggers {
+        // Full ingestion pipeline every 6 hours
+        cron('0 */6 * * *')
+        // Weekly retraining evaluation every Sunday at 02:00
+        cron('0 2 * * 0')
+    }
+
+    // ── Parameters ───────────────────────────────────────────────────────────
+    parameters {
+        booleanParam(
+            name: 'FORCE_RETRAIN',
+            defaultValue: false,
+            description: 'Force model retraining regardless of current accuracy'
+        )
+        booleanParam(
+            name: 'SKIP_INGESTION',
+            defaultValue: false,
+            description: 'Skip API ingestion (run tests and evaluation only)'
+        )
+        choice(
+            name: 'LOG_LEVEL',
+            choices: ['INFO', 'DEBUG', 'WARNING'],
+            description: 'Platform logging level'
+        )
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // STAGES
+    // ════════════════════════════════════════════════════════════════════════
+    stages {
+
+        // ── Stage 1: Environment Validation ──────────────────────────────────
+        stage('Environment Validation') {
+            steps {
+                echo '━━━ Stage 1: Environment Validation ━━━'
+                script {
+                    // Verify Python and required packages
+                    sh """
+                        ${PYTHON} --version
+                        ${PYTHON} -m pip install -r requirements.txt --quiet
+                        echo "✅ Dependencies installed"
+                    """
+
+                    // Verify database connectivity
+                    sh """
+                        ${PYTHON} -c "
+import sys, os
+sys.path.insert(0, '${SRC_DIR}')
+from config import Config
+Config.validate()
+print('✅ API credentials validated')
+"
+                    """
+
+                    // Create reports directory
+                    sh "mkdir -p ${REPORTS_DIR}"
+
+                    echo "✅ Environment validation passed"
+                }
+            }
+        }
+
+        // ── Stage 2: Unit Tests ───────────────────────────────────────────────
+        stage('Unit Tests') {
+            steps {
+                echo '━━━ Stage 2: Unit Tests ━━━'
+                script {
+                    sh """
+                        ${PYTHON} -m pytest ${TEST_DIR}/ \
+                            -v \
+                            --cov=${SRC_DIR} \
+                            --cov-report=xml:${REPORTS_DIR}/coverage.xml \
+                            --cov-report=term-missing \
+                            --cov-fail-under=${COVERAGE_MIN} \
+                            --junit-xml=${REPORTS_DIR}/test_results.xml \
+                            2>&1 | tee ${REPORTS_DIR}/test_output.txt
+                    """
+                }
+            }
+            post {
+                always {
+                    // Publish test results to Jenkins
+                    junit "${REPORTS_DIR}/test_results.xml"
+                    // Publish coverage report
+                    publishHTML([
+                        allowMissing: false,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: "${REPORTS_DIR}",
+                        reportFiles: 'coverage.xml',
+                        reportName: 'Coverage Report'
+                    ])
+                }
+                failure {
+                    echo "❌ Unit tests failed — pipeline aborted"
+                    error("Tests must pass before proceeding")
+                }
+                success {
+                    echo "✅ All unit tests passed with coverage >= ${COVERAGE_MIN}%"
+                }
+            }
+        }
+
+        // ── Stage 3: API Ingestion ────────────────────────────────────────────
+        stage('API Ingestion') {
+            when {
+                not { expression { return params.SKIP_INGESTION } }
+            }
+            steps {
+                echo '━━━ Stage 3: API Ingestion ━━━'
+                script {
+                    sh """
+                        ${PYTHON} ${SRC_DIR}/pipeline_runner.py \
+                            --stage ingest \
+                            --log-level ${params.LOG_LEVEL} \
+                            2>&1 | tee ${REPORTS_DIR}/ingestion_output.txt
+                    """
+
+                    // Archive ingestion log
+                    archiveArtifacts artifacts: "${REPORTS_DIR}/ingestion_output.txt",
+                                     allowEmptyArchive: true
+                }
+            }
+            post {
+                success {
+                    echo "✅ API ingestion complete"
+                }
+                failure {
+                    echo "⚠️ Ingestion failed — continuing pipeline with existing data"
+                    // Don't fail pipeline on ingestion error — use cached data
+                }
+            }
+        }
+
+        // ── Stage 4: Alert Prioritisation ─────────────────────────────────────
+        stage('Alert Prioritisation') {
+            when {
+                not { expression { return params.SKIP_INGESTION } }
+            }
+            steps {
+                echo '━━━ Stage 4: Alert Prioritisation ━━━'
+                script {
+                    sh """
+                        ${PYTHON} ${SRC_DIR}/pipeline_runner.py \
+                            --stage prioritise \
+                            --log-level ${params.LOG_LEVEL} \
+                            2>&1 | tee ${REPORTS_DIR}/prioritisation_output.txt
+                    """
+
+                    // Extract workload reduction metric
+                    def output = readFile("${REPORTS_DIR}/prioritisation_output.txt")
+                    def reductionMatch = output =~ /Workload reduction: ([\d.]+)%/
+                    if (reductionMatch) {
+                        def reduction = reductionMatch[0][1].toFloat()
+                        echo "📊 Workload reduction achieved: ${reduction}%"
+                        if (reduction >= 40.0) {
+                            echo "✅ Objective 3 target met: ${reduction}% >= 40%"
+                        } else {
+                            echo "⚠️ Objective 3 target not yet met: ${reduction}% < 40%"
+                        }
+                        // Store as Jenkins environment variable for reporting
+                        env.WORKLOAD_REDUCTION = "${reduction}"
+                    }
+                }
+            }
+        }
+
+        // ── Stage 5: Model Performance Check ─────────────────────────────────
+        stage('Model Performance Check') {
+            steps {
+                echo '━━━ Stage 5: Model Performance Check ━━━'
+                script {
+                    sh """
+                        ${PYTHON} ${SRC_DIR}/pipeline_runner.py \
+                            --stage evaluate \
+                            --accuracy-threshold ${ACCURACY_MIN} \
+                            2>&1 | tee ${REPORTS_DIR}/evaluation_output.txt
+                    """
+
+                    def output = readFile("${REPORTS_DIR}/evaluation_output.txt")
+
+                    // Parse current accuracy
+                    def accuracyMatch = output =~ /Current accuracy: ([\d.]+)/
+                    if (accuracyMatch) {
+                        def accuracy = accuracyMatch[0][1].toFloat()
+                        env.CURRENT_ACCURACY = "${accuracy}"
+                        echo "📊 Current model accuracy: ${accuracy}"
+
+                        // Determine if retraining is needed
+                        def needsRetrain = accuracy < ACCURACY_MIN.toFloat()
+                        def daysMatch = output =~ /Days since last retrain: (\d+)/
+                        if (daysMatch) {
+                            def daysSince = daysMatch[0][1].toInteger()
+                            env.DAYS_SINCE_RETRAIN = "${daysSince}"
+                            if (daysSince >= RETRAIN_MAX_DAYS.toInteger()) {
+                                needsRetrain = true
+                                echo "⏰ ${daysSince} days since last retrain — scheduled retrain triggered"
+                            }
+                        }
+
+                        env.NEEDS_RETRAIN = needsRetrain ? "true" : "false"
+                        echo "🔄 Retraining needed: ${needsRetrain}"
+                    }
+                }
+            }
+        }
+
+        // ── Stage 6: Model Retraining ─────────────────────────────────────────
+        stage('Model Retraining') {
+            when {
+                anyOf {
+                    expression { return params.FORCE_RETRAIN }
+                    expression { return env.NEEDS_RETRAIN == "true" }
+                }
+            }
+            steps {
+                echo '━━━ Stage 6: Model Retraining ━━━'
+                script {
+                    sh """
+                        ${PYTHON} ${SRC_DIR}/pipeline_runner.py \
+                            --stage retrain \
+                            --accuracy-threshold ${ACCURACY_MIN} \
+                            2>&1 | tee ${REPORTS_DIR}/retraining_output.txt
+                    """
+
+                    def output = readFile("${REPORTS_DIR}/retraining_output.txt")
+
+                    // Parse new model accuracy
+                    def newAccMatch = output =~ /New model accuracy: ([\d.]+)/
+                    if (newAccMatch) {
+                        def newAccuracy = newAccMatch[0][1].toFloat()
+                        env.NEW_ACCURACY = "${newAccuracy}"
+                        echo "📊 New model accuracy: ${newAccuracy}"
+
+                        if (newAccuracy >= ACCURACY_MIN.toFloat()) {
+                            echo "✅ Retraining successful — new model deployed"
+                        } else {
+                            echo "⚠️ New model below threshold — keeping previous model"
+                            error("Retraining failed to meet accuracy threshold")
+                        }
+                    }
+
+                    // Archive the newly trained model
+                    archiveArtifacts artifacts: "${MODEL_DIR}/*.pkl",
+                                     fingerprint: true,
+                                     allowEmptyArchive: true
+                }
+            }
+            post {
+                success {
+                    echo "✅ Model retrained and deployed successfully"
+                }
+                failure {
+                    echo "❌ Model retraining failed — previous model retained"
+                }
+            }
+        }
+
+        // ── Stage 7: Dashboard Refresh ────────────────────────────────────────
+        stage('Dashboard Refresh') {
+            steps {
+                echo '━━━ Stage 7: Dashboard Refresh ━━━'
+                script {
+                    // Signal Grafana to reload dashboards
+                    // In production: POST to Grafana API to reload provisioned dashboards
+                    sh """
+                        ${PYTHON} ${SRC_DIR}/pipeline_runner.py \
+                            --stage dashboard-refresh \
+                            2>&1 | tee ${REPORTS_DIR}/dashboard_output.txt
+                    """
+                    echo "✅ Grafana dashboards refreshed"
+                }
+            }
+            post {
+                failure {
+                    echo "⚠️ Dashboard refresh failed — data still updated in DB"
+                }
+            }
+        }
+
+    } // end stages
+
+    // ════════════════════════════════════════════════════════════════════════
+    // POST-PIPELINE ACTIONS
+    // ════════════════════════════════════════════════════════════════════════
+    post {
+
+        success {
+            echo """
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ PIPELINE COMPLETED SUCCESSFULLY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Build: #${env.BUILD_NUMBER}
+Duration: ${currentBuild.durationString}
+Model Accuracy: ${env.CURRENT_ACCURACY ?: 'Not evaluated'}
+Workload Reduction: ${env.WORKLOAD_REDUCTION ?: 'Not measured'}%
+Retrained: ${env.NEEDS_RETRAIN == 'true' ? 'Yes' : 'No'}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+            emailext(
+                subject: "✅ Threat Intel Platform — Build #${env.BUILD_NUMBER} Passed",
+                body: """
+Pipeline completed successfully.
+
+Build: #${env.BUILD_NUMBER}
+Status: SUCCESS
+Model Accuracy: ${env.CURRENT_ACCURACY ?: 'N/A'}
+Workload Reduction: ${env.WORKLOAD_REDUCTION ?: 'N/A'}%
+Model Retrained: ${env.NEEDS_RETRAIN == 'true' ? 'Yes' : 'No'}
+
+View build: ${env.BUILD_URL}
+                """,
+                to: "${PLATFORM_EMAIL}"
+            )
+        }
+
+        failure {
+            echo "❌ PIPELINE FAILED — Build #${env.BUILD_NUMBER}"
+            emailext(
+                subject: "❌ Threat Intel Platform — Build #${env.BUILD_NUMBER} FAILED",
+                body: """
+Pipeline failed at stage: ${env.STAGE_NAME}
+
+Build: #${env.BUILD_NUMBER}
+Status: FAILED
+
+View build log: ${env.BUILD_URL}console
+                """,
+                to: "${PLATFORM_EMAIL}"
+            )
+        }
+
+        always {
+            // Archive all reports
+            archiveArtifacts artifacts: "${REPORTS_DIR}/**/*",
+                             allowEmptyArchive: true
+
+            // Clean workspace to save disk space
+            cleanWs(
+                cleanWhenSuccess: false,
+                cleanWhenFailure: false,
+                cleanWhenAborted: true
+            )
+        }
+    }
+
+} // end pipeline

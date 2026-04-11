@@ -1,0 +1,20 @@
+# Ignore environment variable files
+.env
+
+# Ignore large files (example: all files over 100MB, but .gitignore can't filter by size)
+# Instead, list specific large files or patterns:
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+*.iso
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.exe
+*.bin
+
+# Add any specific large files here
+# /path/to/largefile.dat
