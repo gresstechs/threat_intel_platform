@@ -152,6 +152,8 @@ class DatabaseManager:
             dbname=Config.DB_NAME,
             user=Config.DB_USER,
             password=Config.DB_PASSWORD,
+            sslmode='require',
+
         )
         self._init_schema()
         logger.info("Database connection pool established.")
