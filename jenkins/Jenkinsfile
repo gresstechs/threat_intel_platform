@@ -55,8 +55,8 @@ pipeline {
 
     // ── Triggers ─────────────────────────────────────────────────────────────
     triggers {
-        cron('0 */6 * * *')
-        cron('0 2 * * 0')
+        // Every 6 hours for ingestion + Sunday 02:00 for weekly retraining
+        cron('0 */6 * * *\n0 2 * * 0')
     }
 
     // ── Parameters ───────────────────────────────────────────────────────────
