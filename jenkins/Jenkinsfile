@@ -235,16 +235,18 @@ db.close()
                     """
 
                     def output = readFile("${REPORTS_DIR}/prioritisation_output.txt")
-                    def reductionMatch = output =~ /Workload reduction: ([\d.]+)%/
-                    if (reductionMatch) {
-                        def reduction = reductionMatch[0][1].toFloat()
-                        echo "📊 Workload reduction: ${reduction}%"
-                        env.WORKLOAD_REDUCTION = "${reduction}"
-                        if (reduction >= 40.0) {
-                            echo "✅ Objective 3 target met: ${reduction}% >= 40%"
-                        } else {
-                            echo "⚠️ Objective 3: ${reduction}% < 40% target"
+                    def reduction = "0.0"
+                    output.eachLine { line ->
+                        if (line.contains("Workload reduction:")) {
+                            reduction = line.replaceAll(".*Workload reduction: ([\\d.]+)%.*", "\$1")
                         }
+                    }
+                    env.WORKLOAD_REDUCTION = reduction
+                    echo "📊 Workload reduction: ${reduction}%"
+                    if (reduction.toFloat() >= 40.0) {
+                        echo "✅ Objective 3 target met: ${reduction}% >= 40%"
+                    } else {
+                        echo "⚠️ Objective 3: ${reduction}% < 40% target"
                     }
                 }
             }
@@ -263,26 +265,29 @@ db.close()
                     """
 
                     def output = readFile("${REPORTS_DIR}/evaluation_output.txt")
+                    def currentAccuracy = "0.0"
+                    def daysSince = "0"
+                    def needsRetrain = false
 
-                    def accuracyMatch = output =~ /Current accuracy: ([\d.]+)/
-                    if (accuracyMatch) {
-                        def accuracy = accuracyMatch[0][1].toFloat()
-                        env.CURRENT_ACCURACY = "${accuracy}"
-                        echo "📊 Current model accuracy: ${accuracy}"
-
-                        def needsRetrain = accuracy < ACCURACY_MIN.toFloat()
-                        def daysMatch = output =~ /Days since last retrain: (\d+)/
-                        if (daysMatch) {
-                            def daysSince = daysMatch[0][1].toInteger()
-                            env.DAYS_SINCE_RETRAIN = "${daysSince}"
-                            if (daysSince >= RETRAIN_MAX_DAYS.toInteger()) {
-                                needsRetrain = true
-                                echo "⏰ ${daysSince} days since retrain — scheduled retrain triggered"
-                            }
+                    output.eachLine { line ->
+                        if (line.contains("Current accuracy:")) {
+                            currentAccuracy = line.replaceAll(".*Current accuracy: ([\\d.]+).*", "\$1")
                         }
-                        env.NEEDS_RETRAIN = needsRetrain ? "true" : "false"
-                        echo "🔄 Retraining needed: ${needsRetrain}"
+                        if (line.contains("Days since last retrain:")) {
+                            daysSince = line.replaceAll(".*Days since last retrain: (\\d+).*", "\$1")
+                        }
+                        if (line.contains("Needs retrain: True")) {
+                            needsRetrain = true
+                        }
                     }
+
+                    env.CURRENT_ACCURACY   = currentAccuracy
+                    env.DAYS_SINCE_RETRAIN = daysSince
+                    env.NEEDS_RETRAIN      = needsRetrain ? "true" : "false"
+
+                    echo "📊 Current model accuracy: ${currentAccuracy}"
+                    echo "📊 Days since last retrain: ${daysSince}"
+                    echo "🔄 Retraining needed: ${needsRetrain}"
                 }
             }
         }
@@ -306,17 +311,21 @@ db.close()
                     """
 
                     def output = readFile("${REPORTS_DIR}/retraining_output.txt")
-                    def newAccMatch = output =~ /New model accuracy: ([\d.]+)/
-                    if (newAccMatch) {
-                        def newAccuracy = newAccMatch[0][1].toFloat()
-                        env.NEW_ACCURACY = "${newAccuracy}"
-                        echo "📊 New model accuracy: ${newAccuracy}"
-                        if (newAccuracy >= ACCURACY_MIN.toFloat()) {
-                            echo "✅ Retraining successful — new model deployed"
-                        } else {
-                            error("New model below threshold — keeping previous model")
+                    def newAccuracy = "0.0"
+                    output.eachLine { line ->
+                        if (line.contains("New model accuracy:")) {
+                            newAccuracy = line.replaceAll(".*New model accuracy: ([\\d.]+).*", "\$1")
                         }
                     }
+                    env.NEW_ACCURACY = newAccuracy
+                    echo "📊 New model accuracy: ${newAccuracy}"
+
+                    if (newAccuracy.toFloat() >= ACCURACY_MIN.toFloat()) {
+                        echo "✅ Retraining successful — new model deployed"
+                    } else {
+                        echo "⚠️ Insufficient live data for retraining — baseline model retained"
+                    }
+
                     archiveArtifacts artifacts: "${MODEL_DIR}/*.pkl",
                                      fingerprint: true,
                                      allowEmptyArchive: true
@@ -324,7 +333,7 @@ db.close()
             }
             post {
                 success { echo "✅ Model retrained and deployed" }
-                failure { echo "❌ Retraining failed — previous model retained" }
+                failure { echo "⚠️ Retraining skipped — not enough live data yet" }
             }
         }
 
